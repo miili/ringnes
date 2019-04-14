@@ -11,9 +11,10 @@
 #include "ringbuffer.h"
 
 
-/** Convenience wrapper around memfd_create syscall, because apparently this is
-  * so scary that glibc doesn't provide it...
-  */
+/*
+Convenience wrapper around memfd_create syscall, because apparently this is
+so scary that glibc doesn't provide it...
+*/
 static inline int memfd_create(const char *name, unsigned int flags) {
     return syscall(__NR_memfd_create, name, flags);
 }
@@ -132,7 +133,7 @@ ringbuffer_put(Ringbuffer* b, uint8_t* buffer, size_t size) {
 typedef struct {
     PyObject_HEAD
     /* Type-specific fields go below. */
-    Ringbuffer arr;
+    Ringbuffer buffer;
 } PyRingbuffer;
 
 
@@ -141,13 +142,13 @@ static int PyRingbuffer_Init(PyRingbuffer *self, PyObject *args, PyObject *kwds)
     size_t capacity = 0;
 
     // init may have already been called
-    if (self->arr.fd != 0) {
-        deallocate_Ringbuffer(&self->arr);
+    if (self->buffer.fd != 0) {
+        deallocate_Ringbuffer(&self->buffer);
     }
 
     static char *kwlist[] = {"capacity", NULL};
     if (! PyArg_ParseTupleAndKeywords(args, kwds, "i", kwlist, &capacity)) {
-        PyErr_BadArgument();
+        PyErr_SetString(PyExc_TypeError, "No capacity given.");
         return -1;
     }
 
@@ -156,7 +157,7 @@ static int PyRingbuffer_Init(PyRingbuffer *self, PyObject *args, PyObject *kwds)
         return -1;
     }
 
-    return initialize_Ringbuffer(&self->arr, capacity);
+    return initialize_Ringbuffer(&self->buffer, capacity);
 };
 
 
@@ -164,7 +165,7 @@ static int PyRingbuffer_Init(PyRingbuffer *self, PyObject *args, PyObject *kwds)
 static void
 PyRingbuffer_dealloc(PyRingbuffer* self)
 {
-    deallocate_Ringbuffer(&self->arr);
+    deallocate_Ringbuffer(&self->buffer);
     Py_TYPE(self)->tp_free((PyObject*)self);
 };
 
@@ -182,24 +183,24 @@ PyRingbuffer_Put(PyRingbuffer *self, PyObject *args) {
 
     buffer = PyMemoryView_GET_BUFFER(mview);
 
-    pthread_mutex_lock(&self->arr.lock);
-    ringbuffer_put(&self->arr, buffer->buf, buffer->len);
-    pthread_mutex_unlock(&self->arr.lock);
+    pthread_mutex_lock(&self->buffer.lock);
+    ringbuffer_put(&self->buffer, buffer->buf, buffer->len);
+    pthread_mutex_unlock(&self->buffer.lock);
 
     return PyLong_FromSize_t(buffer->len);
 };
 
 static PyObject*
 PyRingbuffer_GetHead(PyRingbuffer *self) {
-    return PyLong_FromSize_t(self->arr.head);
+    return PyLong_FromSize_t(self->buffer.head);
 };
 
 static PyObject*
 PyRingbuffer_GetUsed(PyRingbuffer *self) {
-    if (self->arr.wrapped) {
-        return PyLong_FromSize_t(self->arr.capacity);    
+    if (self->buffer.wrapped) {
+        return PyLong_FromSize_t(self->buffer.capacity);    
     }
-    return PyLong_FromSize_t(self->arr.head);
+    return PyLong_FromSize_t(self->buffer.head);
 };
 
 /* Here is the buffer interface function */
@@ -213,16 +214,17 @@ static int PyRingbuffer_GetBuffer(PyObject *obj, Py_buffer *view, int flags)
     PyRingbuffer* self = (PyRingbuffer*)obj;
 
     view->obj = (PyObject*) self;
-    view->buf = self->arr.buffer + self->arr.head;
-    view->len = self->arr.capacity;
+    view->buf = self->buffer.buffer + self->buffer.head;
+    view->len = self->buffer.capacity;
     view->readonly = 1;
     view->itemsize = 0;
     view->format = NULL;
     view->ndim = 0;
-    view->shape = NULL;  // length-1 sequence of dimensions
-    view->strides = NULL;  // for the simple case we can do this
+    view->shape = NULL;
+    view->strides = NULL;
     view->suboffsets = NULL;
     view->internal = NULL;
+
     Py_INCREF(self);  // need to increase the reference count
     return 0;
 }
@@ -235,14 +237,20 @@ static PyBufferProcs PyRingbuffer_as_buffer = {
 
 
 static PyMethodDef Ringbuffer_methods[] = {
-    {"put", (PyCFunction) PyRingbuffer_Put, METH_VARARGS, "Put bytes in the ringbuffer" },
+    {"put", (PyCFunction) PyRingbuffer_Put, METH_VARARGS,
+     PyDoc_STR("Ringbuffer.put(memoryview)\n\n"
+               "Put bytes in the ringbuffer.\n\n"
+               "Parameters\n"
+               "----------\n\n"
+               "memoryview : memoryview\n"
+               "    Feed a memoryview into the ringbufffer.\n") },
     {NULL}  // Sentinel
 };
 
 
 static PyGetSetDef Ringbuffer_getset[] = {
-    {"head", (getter) PyRingbuffer_GetHead, NULL, "Position of the head in bytes"},
-    {"used", (getter) PyRingbuffer_GetUsed, NULL, "Bytes used of the buffer"},
+    {"head", (getter) PyRingbuffer_GetHead, NULL, PyDoc_STR("Position of the head in bytes") },
+    {"used", (getter) PyRingbuffer_GetUsed, NULL, PyDoc_STR("Bytes used of the buffer") },
     {NULL} // Sentinel
 };
 
@@ -253,8 +261,8 @@ static PyTypeObject PyRingbufferType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     "ringnes.Ringbuffer",        /* tp_name */
     sizeof(PyRingbuffer),            /* tp_basicsize */
-    0,                            /* tp_itemsize */
-    (destructor)PyRingbuffer_dealloc,/* tp_dealloc */
+    1,                            /* tp_itemsize */
+    (destructor) PyRingbuffer_dealloc,/* tp_dealloc */
     0,                            /* tp_print */
     0,                            /* tp_getattr */
     0,                            /* tp_setattr */
@@ -270,22 +278,29 @@ static PyTypeObject PyRingbufferType = {
     PyObject_GenericSetAttr,      /* tp_setattro */
     &PyRingbuffer_as_buffer,      /* tp_as_buffer */
     Py_TPFLAGS_DEFAULT,           /* tp_flags */
-    "Ringbuffer object",          /* tp_doc */
+    PyDoc_STR(
+    "ringnes.Ringbuffer(capacity)\n\n"
+    "A ringbuffer offering a continous representation of the buffer\n"
+    "through buffer interface.\n\n"
+    "Parameters\n"
+    "----------\n"
+    "capacity : int\n"
+    "   Size of the ringbuffer in bytes\n"),/* tp_doc */
     0,                            /* tp_traverse */
     0,                            /* tp_clear */
     0,                            /* tp_richcompare */
     0,                            /* tp_weaklistoffset */
     0,                            /* tp_iter */
     0,                            /* tp_iternext */
-    Ringbuffer_methods,          /* tp_methods */
+    Ringbuffer_methods,           /* tp_methods */
     0,                            /* tp_members */
-    Ringbuffer_getset,           /* tp_getset */
+    Ringbuffer_getset,            /* tp_getset */
     0,                            /* tp_base */
     0,                            /* tp_dict */
     0,                            /* tp_descr_get */
     0,                            /* tp_descr_set */
     0,                            /* tp_dictoffset */
-    (initproc)PyRingbuffer_Init,     /* tp_init */
+    (initproc) PyRingbuffer_Init,     /* tp_init */
 };
 
 /* now we initialize the Python module which contains our new object: */
