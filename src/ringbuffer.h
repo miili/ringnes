@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 typedef struct{
     int fd;
@@ -10,4 +11,6 @@ typedef struct{
     size_t to_end;
     size_t wrap;
     bool wrapped;
+
+    pthread_mutex_t lock;
 } Ringbuffer;

@@ -7,7 +7,6 @@
 #include <sys/types.h>
 
 #include <Python.h>
-#include <stdbool.h>
 
 #include "ringbuffer.h"
 
@@ -59,6 +58,12 @@ initialize_Ringbuffer(Ringbuffer* b, size_t capacity) {
         return NULL;
     }
 
+    // Initialize synchronization primitives
+    if(pthread_mutex_init(&b->lock, NULL) != 0){
+        PyErr_Format(PyExc_SystemError, "Could not initialize mutex");
+        return NULL;
+    }
+
     b->capacity = capacity;
 
     b->head = 0;
@@ -91,19 +96,27 @@ deallocate_Ringbuffer(Ringbuffer* b) {
         PyErr_Format(PyExc_SystemError, "Could not close anonymous file");
         return NULL;
     }
+
+    if(pthread_mutex_destroy(&b->lock) != 0){
+        PyErr_Format(PyExc_SystemError, "Could not destroy mutex");
+        return NULL;
+    }
     Py_RETURN_NONE;
 }
 
 static void
 ringbuffer_put(Ringbuffer* b, uint8_t* buffer, size_t size) {
-
     if (size <= b->to_end) {
+
+        pthread_mutex_unlock(&b->lock);
         memcpy(&b->buffer[b->head], buffer, size);
         b->head += size;
         b->to_end -= size;
 
         printf("Wrote %lu bytes; capacity %lu; head at %lu; to_end %lu\n", size, b->capacity, b->head, b->to_end);
+        pthread_mutex_unlock(&b->lock);
     } else {
+        pthread_mutex_unlock(&b->lock);
         b->wrap = size - b->to_end;
         ringbuffer_put(b, buffer, b->to_end);
 
