@@ -10,43 +10,47 @@
 
 #include "ringbuffer.h"
 
-/** Convenience wrapper around memfd_create syscall, because apparently this is
-  * so scary that glibc doesn't provide it...
-  */
-static inline int memfd_create(const char *name, unsigned int flags) {
-    return syscall(__NR_memfd_create, name, flags);
-}
-
-/** Convenience wrappers for erroring out
-  */
-static inline void queue_error(const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    fprintf(stderr, "queue error: ");
-    vfprintf(stderr, fmt, args);
-    fprintf(stderr, "\n");
-    va_end(args);
-    abort();
-}
-static inline void queue_error_errno(const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    fprintf(stderr, "queue error: ");
-    vfprintf(stderr, fmt, args);
-    fprintf(stderr, " (errno %d)\n", errno);
-    va_end(args);
-    abort();
-}
-
 
 /* initialize the ringbuffer */
 static void initialize_Ringbuffer(Ringbuffer* b, size_t capacity) {
+
     if(capacity % getpagesize() != 0) {
-            // capacity += getpagesize() - (capacity % getpagesize());
-            queue_error("Requested capacity (%lu) is not a multiple of the page capacity (%d)", capacity, getpagesize());
+        // capacity += getpagesize() - (capacity % getpagesize());
+        PyErr_Format(PyExc_ValueError, "Requested capacity (%lu) is not a multiple of the page capacity (%d)", capacity, getpagesize());
+        return (PyObject *) NULL;
     }
+
+    // Create an anonymous file backed by memory
+    if((b->fd = memfd_create("queue_region", 0)) == -1){
+        PyErr_Format(PyExc_SystemError, "Could not obtain anonymous file");
+        return (PyObject *) NULL;
+    }
+
+    // Set buffer size
+    if(ftruncate(b->fd, capacity) != 0){
+        PyErr_Format(PyExc_SystemError, "Could not set size of anonymous file");
+        return (PyObject *) NULL;
+    }
+
+    // Ask mmap for a good address
+    if((b->buffer = mmap(NULL, 2 * capacity, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) == MAP_FAILED){
+        PyErr_Format(PyExc_SystemError, "Could not allocate virtual memory");
+        return (PyObject *) NULL;
+    }
+    
+    // Mmap first region
+    if(mmap(b->buffer, capacity, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, b->fd, 0) == MAP_FAILED){
+        PyErr_Format(PyExc_SystemError, "Could not map buffer into virtual memory");
+        return (PyObject *) NULL;
+    }
+    
+    // Mmap second region, with exact address
+    if(mmap(b->buffer + capacity, capacity, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, b->fd, 0) == MAP_FAILED){
+        PyErr_Format(PyExc_SystemError, "Could not map buffer into virtual memory");
+        return (PyObject *) NULL;
+    }
+
     b->capacity = capacity;
-    b->arr = PyMem_RawMalloc(b->capacity);
 
     b->head = 0;
     b->to_end = b->capacity;
@@ -55,15 +59,29 @@ static void initialize_Ringbuffer(Ringbuffer* b, size_t capacity) {
 
 /* free the memory when finished */
 static void deallocate_Ringbuffer(Ringbuffer* b) {
-    PyMem_RawFree(b->arr);
-    b->arr = NULL;
+
+    if (b->fd == 0) {
+        return 0;
+    }
+    
+    if(munmap(b->buffer + b->capacity, b->capacity) != 0){
+        PyErr_Format(PyExc_SystemError, "Could not unmap buffer");
+    }
+    
+    if(munmap(b->buffer, b->capacity) != 0){
+        PyErr_Format(PyExc_SystemError, "Could not unmap buffer");
+    }
+    
+    if(close(b->fd) != 0){
+        PyErr_Format(PyExc_SystemError, "Could not close anonymous file");
+    }
 }
 
 static void ringbuffer_put(Ringbuffer* b, uint8_t* buffer, size_t size) {
     size_t wrap;
 
     if (size <= b->to_end) {
-        memcpy(&b->arr[b->head], buffer, size);
+        memcpy(&b->buffer[b->head], buffer, size);
         b->head += size;
         b->to_end = b->capacity - b->head;
         printf("Wrote %d bytes; capacity %d; head at %d; to_end %d\n", size, b->capacity, b->head, b->to_end);
@@ -91,15 +109,20 @@ static int PyRingbuffer_init(PyRingbuffer *self, PyObject *args, PyObject *kwds)
     size_t capacity = 0;
 
     // init may have already been called
-    if (self->arr.arr != NULL);
+    if (self->arr.fd != 0) {
         deallocate_Ringbuffer(&self->arr);
+    }
 
     static char *kwlist[] = {"capacity", NULL};
-    if (! PyArg_ParseTupleAndKeywords(args, kwds, "|i", kwlist, &capacity))
-        return -1;
+    if (! PyArg_ParseTupleAndKeywords(args, kwds, "|i", kwlist, &capacity)) {
+        PyErr_SetString(PyExc_ValueError, "Could not parse args");
+        return (PyObject *) NULL;
+    }
 
-    if (capacity < 0)
-        capacity = 0;
+    if (capacity < 0) {
+        PyErr_SetString(PyExc_ValueError, "Capacity cannot be negative");
+        return (PyObject *) NULL;
+    }
 
     initialize_Ringbuffer(&self->arr, capacity);
     return 0;
@@ -123,12 +146,13 @@ PyRingbuffer_put(PyRingbuffer *self, PyObject *args) {
     PyArg_ParseTuple(args, "O:ref", &mview);
     if (! PyMemoryView_Check(mview)) {
         PyErr_SetString(PyExc_ValueError, "Feed a memoryview!");
-        return 0;
+        return (PyObject *) NULL;
     }
-    buffer = PyMemoryView_GET_BUFFER(mview);
-    printf("%d, %d, %d", buffer->buf, buffer->len, buffer->itemsize);
 
+    buffer = PyMemoryView_GET_BUFFER(mview);
+    // printf("%d, %d, %d", buffer->buf, buffer->len, buffer->itemsize);
     ringbuffer_put(&self->arr, buffer->buf, buffer->len);
+
     return PyLong_FromSize_t(buffer->len);
 }
 
@@ -139,13 +163,13 @@ PyRingbuffer_getbuffer(PyObject *obj, Py_buffer *view, int flags)
 {
   if (view == NULL) {
     PyErr_SetString(PyExc_ValueError, "NULL view in getbuffer");
-    return -1;
+    return (PyObject *) NULL;
   }
 
   PyRingbuffer* self = (PyRingbuffer*)obj;
   view->obj = (PyObject*) self;
-  view->buf = self->arr.arr;
-  view->len = self->arr.capacity;
+  view->buf = self->arr.buffer;
+  view->len = self->arr.capacity * 2;
   view->readonly = 1;
   view->itemsize = NULL;
   view->format = NULL;
