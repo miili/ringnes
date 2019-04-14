@@ -3,10 +3,14 @@
 
 _Overwriting ringbuffer for Python_
 
-A simple overwriting ringbuffer for Python, providing a continous strip of virtual memory over the ring trough Python C-API.
-The `put` method is thread safe, yet a consumer `get` is not implemented at the moment. Please feel free to contribute!
+A simple overwriting ringbuffer for Python, providing a continous strip of virtual memory over the ring trough Python C-API using mmap back magic.
+The `put` method is thread safe.
 
 More from the ringnes brewery: https://ringnes.no/
+
+# ToDo
+
+A consumer `get` is not implemented at the moment. Please feel free to contribute!
 
 # Example
 
