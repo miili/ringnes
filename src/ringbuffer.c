@@ -20,48 +20,47 @@ static inline int memfd_create(const char *name, unsigned int flags) {
 
 
 /* initialize the ringbuffer */
-static PyObject *
-initialize_Ringbuffer(Ringbuffer* b, size_t capacity) {
+static int initialize_Ringbuffer(Ringbuffer* b, size_t capacity) {
 
     if(capacity % getpagesize() != 0) {
-        return PyErr_Format(PyExc_ValueError, "Requested capacity (%lu) is not a multiple of the page capacity (%d)", capacity, getpagesize());
-        return NULL;
+        PyErr_Format(PyExc_ValueError, "Requested capacity (%lu) is not a multiple of the page capacity %d", capacity, getpagesize());
+        return -1;
     }
 
     // Create an anonymous file backed by memory
     if((b->fd = memfd_create("queue_region", 0)) == -1){
         PyErr_Format(PyExc_SystemError, "Could not obtain anonymous file");
-        return NULL;
+        return -1;
     }
 
     // Set buffer size
     if(ftruncate(b->fd, capacity) != 0){
         PyErr_Format(PyExc_SystemError, "Could not set size of anonymous file");
-        return NULL;
+        return -1;
     }
 
     // Ask mmap for a good address
     if((b->buffer = mmap(NULL, 2 * capacity, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) == MAP_FAILED){
         PyErr_Format(PyExc_SystemError, "Could not allocate virtual memory");
-        return NULL;
+        return -1;
     }
     
     // Mmap first region
     if(mmap(b->buffer, capacity, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, b->fd, 0) == MAP_FAILED){
         PyErr_Format(PyExc_SystemError, "Could not map buffer into virtual memory");
-        return NULL;
+        return -1;
     }
     
     // Mmap second region, with exact address
     if(mmap(b->buffer + capacity, capacity, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, b->fd, 0) == MAP_FAILED){
         PyErr_Format(PyExc_SystemError, "Could not map buffer into virtual memory");
-        return NULL;
+        return -1;
     }
 
     // Initialize synchronization primitives
     if(pthread_mutex_init(&b->lock, NULL) != 0){
         PyErr_Format(PyExc_SystemError, "Could not initialize mutex");
-        return NULL;
+        return -1;
     }
 
     b->capacity = capacity;
@@ -70,13 +69,13 @@ initialize_Ringbuffer(Ringbuffer* b, size_t capacity) {
     b->to_end = b->capacity;
     b->wrap = 0;
     b->wrapped = false;
-    Py_RETURN_NONE;
+
+    return 0;
 }
 
 
 /* free the memory when finished */
-static PyObject*
-deallocate_Ringbuffer(Ringbuffer* b) {
+int deallocate_Ringbuffer(Ringbuffer* b) {
 
     if (b->fd == 0) {
         return 0;
@@ -84,39 +83,37 @@ deallocate_Ringbuffer(Ringbuffer* b) {
     
     if(munmap(b->buffer + b->capacity, b->capacity) != 0){
         PyErr_Format(PyExc_SystemError, "Could not unmap buffer");
-        return NULL;
+        return -1;
     }
     
     if(munmap(b->buffer, b->capacity) != 0){
         PyErr_Format(PyExc_SystemError, "Could not unmap buffer");
-        return NULL;
+        return -1;
     }
     
     if(close(b->fd) != 0){
         PyErr_Format(PyExc_SystemError, "Could not close anonymous file");
-        return NULL;
+        return -1;
     }
 
     if(pthread_mutex_destroy(&b->lock) != 0){
         PyErr_Format(PyExc_SystemError, "Could not destroy mutex");
-        return NULL;
+        return -1;
     }
-    Py_RETURN_NONE;
+
+    return 0;
 }
 
-static void
+static int
 ringbuffer_put(Ringbuffer* b, uint8_t* buffer, size_t size) {
     if (size <= b->to_end) {
 
-        pthread_mutex_unlock(&b->lock);
         memcpy(&b->buffer[b->head], buffer, size);
         b->head += size;
         b->to_end -= size;
 
         printf("Wrote %lu bytes; capacity %lu; head at %lu; to_end %lu\n", size, b->capacity, b->head, b->to_end);
-        pthread_mutex_unlock(&b->lock);
     } else {
-        pthread_mutex_unlock(&b->lock);
         b->wrap = size - b->to_end;
         ringbuffer_put(b, buffer, b->to_end);
 
@@ -126,6 +123,7 @@ ringbuffer_put(Ringbuffer* b, uint8_t* buffer, size_t size) {
         ringbuffer_put(b, buffer + size - b->wrap, b->wrap);
         b->wrapped = true;
     }
+    return 0;
 
 };
 
@@ -139,8 +137,7 @@ typedef struct {
 
 
 /* This is the __init__ function, implemented in C */
-static PyObject *
-PyRingbuffer_init(PyRingbuffer *self, PyObject *args, PyObject *kwds) {
+static int PyRingbuffer_Init(PyRingbuffer *self, PyObject *args, PyObject *kwds) {
     size_t capacity = 0;
 
     // init may have already been called
@@ -151,12 +148,12 @@ PyRingbuffer_init(PyRingbuffer *self, PyObject *args, PyObject *kwds) {
     static char *kwlist[] = {"capacity", NULL};
     if (! PyArg_ParseTupleAndKeywords(args, kwds, "i", kwlist, &capacity)) {
         PyErr_BadArgument();
-        return NULL;
+        return -1;
     }
 
     if (capacity <= 0) {
         PyErr_SetString(PyExc_ValueError, "Initialized with a valid capacity");
-        return NULL;
+        return -1;
     }
 
     return initialize_Ringbuffer(&self->arr, capacity);
@@ -184,7 +181,10 @@ PyRingbuffer_Put(PyRingbuffer *self, PyObject *args) {
     }
 
     buffer = PyMemoryView_GET_BUFFER(mview);
+
+    pthread_mutex_lock(&self->arr.lock);
     ringbuffer_put(&self->arr, buffer->buf, buffer->len);
+    pthread_mutex_unlock(&self->arr.lock);
 
     return PyLong_FromSize_t(buffer->len);
 };
@@ -207,7 +207,7 @@ static int PyRingbuffer_GetBuffer(PyObject *obj, Py_buffer *view, int flags)
 {
     if (view == NULL) {
       PyErr_SetString(PyExc_ValueError, "NULL view in getbuffer");
-      return 0;
+      return -1;
     }
 
     PyRingbuffer* self = (PyRingbuffer*)obj;
@@ -224,7 +224,7 @@ static int PyRingbuffer_GetBuffer(PyObject *obj, Py_buffer *view, int flags)
     view->suboffsets = NULL;
     view->internal = NULL;
     Py_INCREF(self);  // need to increase the reference count
-    return 1;
+    return 0;
 }
 
 static PyBufferProcs PyRingbuffer_as_buffer = {
@@ -285,7 +285,7 @@ static PyTypeObject PyRingbufferType = {
     0,                            /* tp_descr_get */
     0,                            /* tp_descr_set */
     0,                            /* tp_dictoffset */
-    (initproc)PyRingbuffer_init,     /* tp_init */
+    (initproc)PyRingbuffer_Init,     /* tp_init */
 };
 
 /* now we initialize the Python module which contains our new object: */

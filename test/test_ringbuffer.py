@@ -3,7 +3,7 @@ from ringnes import Ringbuffer
 import matplotlib.pyplot as plt
 
 import numpy as num
-BUF_CAPACITY = 4096 * 5
+BUF_CAPACITY = 4092 * 5
 
 
 def test_ringbuffer():
