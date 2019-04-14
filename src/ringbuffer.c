@@ -113,7 +113,7 @@ ringbuffer_put(Ringbuffer* b, uint8_t* buffer, size_t size) {
         b->head += size;
         b->to_end -= size;
 
-        printf("Wrote %lu bytes; capacity %lu; head at %lu; to_end %lu\n", size, b->capacity, b->head, b->to_end);
+        // printf("Wrote %lu bytes; capacity %lu; head at %lu; to_end %lu\n", size, b->capacity, b->head, b->to_end);
     } else {
         b->wrap = size - b->to_end;
         ringbuffer_put(b, buffer, b->to_end);
