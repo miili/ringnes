@@ -3,14 +3,15 @@
 
 _Overwriting ringbuffer for Python_
 
-A simple overwriting ringbuffer for Python, providing a continous strip of virtual memory over the ring.
+A simple overwriting ringbuffer for Python, providing a continous strip of virtual memory over the ring trough Python C-API.
 The `put` method is thread safe, yet a consumer `get` is not implemented at the moment. Please feel free to contribute!
 
+More from the ringnes brewery: https://ringnes.no/
 
 # Example
 
 ```python
-from ringenes import Ringbuffer
+from ringnes import Ringbuffer
 import numpy as num
 
 # Capacity in bytes
@@ -23,6 +24,15 @@ for _ in range(20):
 
 
 receive = num.frombuffer(ring, dtype=num.int32)[::-1]
+```
+
+# Installation
+
+Python development headers are required, that's it.
+
+```sh
+sudo apt-get install python3-dev
+pip3 install git+https://github.com/miili/ringnes.git
 ```
 
 
