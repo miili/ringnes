@@ -121,13 +121,15 @@ PyRingbuffer_put(PyRingbuffer *self, PyObject *args) {
     Py_buffer* buffer;
 
     PyArg_ParseTuple(args, "O:ref", &mview);
-    if (PyMemoryView_Check(mview)) {
+    if (! PyMemoryView_Check(mview)) {
         PyErr_SetString(PyExc_ValueError, "Feed a memoryview!");
+        return 0;
     }
     buffer = PyMemoryView_GET_BUFFER(mview);
+    printf("%d, %d, %d", buffer->buf, buffer->len, buffer->itemsize);
 
     ringbuffer_put(&self->arr, buffer->buf, buffer->len);
-    return buffer->len;
+    return PyLong_FromSize_t(buffer->len);
 }
 
 

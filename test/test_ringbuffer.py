@@ -14,7 +14,7 @@ def test_ringbuffer():
     print(type(buf))
     print(dir(buf))
 
-    for _ in range(1):
+    for _ in range(20):
         buf.put(memoryview(data))
         arr = num.frombuffer(buf, dtype=num.int32)
         print(arr)
