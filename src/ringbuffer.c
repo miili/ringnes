@@ -212,6 +212,7 @@ static int PyRingbuffer_GetBuffer(PyObject *obj, Py_buffer *view, int flags)
     }
 
     PyRingbuffer* self = (PyRingbuffer*)obj;
+    pthread_mutex_lock(&self->buffer.lock);
 
     view->obj = (PyObject*) self;
     view->buf = self->buffer.buffer + self->buffer.head;
@@ -225,6 +226,7 @@ static int PyRingbuffer_GetBuffer(PyObject *obj, Py_buffer *view, int flags)
     view->suboffsets = NULL;
     view->internal = NULL;
 
+    pthread_mutex_unlock(&self->buffer.lock);
     Py_INCREF(self);  // need to increase the reference count
     return 0;
 }
