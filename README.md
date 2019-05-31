@@ -3,7 +3,7 @@
 
 _Overwriting ringbuffer for Python_
 
-A simple overwriting ringbuffer for Python, providing a continous strip of virtual memory over the ring trough Python C-API using mmap back magic.
+A simple overwriting ringbuffer for Python, providing a continous strip of virtual memory over the ring trough Python C-API using mmap black magic.
 The `put` method is thread safe.
 
 More from the ringnes brewery: https://ringnes.no/
